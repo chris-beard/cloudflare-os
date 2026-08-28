@@ -7,6 +7,7 @@ import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import type { Collection, Singleton } from "@gadgets/typed-storage";
 import type { Overseer } from "@gadgets/workshop-shared/api";
 import { OverseerDurableObject, makeOverseerStorage } from "../src/overseer.js";
+import { createWorkshopLogger } from "../src/observability.js";
 import type { ActionRecord } from "../src/overseer.js";
 import { makeMockStorage } from "./mock-storage.js";
 
@@ -81,6 +82,7 @@ export async function openFakeOverseer(
     impl: {
       ownerId,
       assertGatekeeperUsable: () => {},
+      logger: createWorkshopLogger("test"),
       ensureAmbientCapsules: async () => {},
       markOutputsDirty: () => {},
       joinSession: () => () => {},
@@ -93,7 +95,11 @@ export async function openFakeOverseer(
       // which these tests never pass.
       authorizeCollaborator: async () => role,
       getSharingManager: async () => ({}),
-      ctx: { id: { toString: () => "workspace-id" }, exports: opts.exports ?? {} },
+      ctx: {
+        id: { toString: () => "workspace-id" },
+        exports: opts.exports ?? {},
+        waitUntil: () => {},
+      },
       users: {
         idFromString: (id: string) => id,
         get: () => ({
@@ -101,6 +107,8 @@ export async function openFakeOverseer(
           recordSharedGadgetOpen: async () => {},
         }),
       },
+      applyDecidedActions: async () => [] as number[],
+      withActionsSettled: async (_gatekeeperId: number, transition: () => void) => transition(),
       storage: Object.assign(storage, {
         containsRestrictedData: { get: () => false },
         title: { get: () => "Test Workspace" },
