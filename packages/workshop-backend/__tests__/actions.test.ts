@@ -111,7 +111,14 @@ function makeLegacyGatekeeper(opts: {remote?: boolean, failApply?: number[]} = {
 }
 
 function makeDriver(storage: ActionSyncStorage, target: GatekeeperActionTarget) {
-  return new ActionSyncDriver(storage, () => target);
+  return new ActionSyncDriver(storage, () => target, {
+    applyLegacyAction: async (gatekeeper, record) => {
+      let apply = gatekeeper.applyAction as unknown as (action: number) => Promise<void>;
+      await apply(record.action);
+    },
+    persistApproved: record => storage.actions.put(record),
+    persistRejected: record => storage.actions.put(record),
+  });
 }
 
 // Drain the microtask queue (and one macrotask) so parked continuations reach their next await.

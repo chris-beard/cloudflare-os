@@ -2013,7 +2013,18 @@ class OverseerImpl implements AgentHooks {
     this.defaultGadgetId = this.storage.defaultGadgetId.get();
 
     this.#actionSync = new ActionSyncDriver(
-        this.storage, gatekeeperId => this.getGatekeeperFacet(gatekeeperId));
+        this.storage, gatekeeperId => this.getGatekeeperFacet(gatekeeperId), {
+          applyLegacyAction: (gatekeeper, record) => gatekeeper.applyAction(record.action,
+              new GitCacheImpl(this.gitCache, record.gatekeeperId, record.id)),
+          persistApproved: record => this.storage.transaction(() => {
+            this.gitCache.convertPushMarksToOnRemote(record.id);
+            this.storage.actions.put(record);
+          }),
+          persistRejected: record => this.storage.transaction(() => {
+            this.gitCache.clearPushMarks(record.id);
+            this.storage.actions.put(record);
+          }),
+        });
 
     // Mirror every gadget-registry change into the owner's outputs index. Subscribing here makes
     // the registry the single chokepoint, so creation, acceptance, renaming, reverting and
@@ -11251,7 +11262,6 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       fresh.appliedAt = new Date();
       fresh.resolvedBy = profile;
       fresh.vetoPending = true;
-      delete fresh.failure;
       this.impl.storage.transaction(() => {
         this.impl.gitCache.clearPushMarks(fresh.id);
         this.impl.storage.actions.put(fresh);

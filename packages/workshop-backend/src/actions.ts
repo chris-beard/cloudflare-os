@@ -38,6 +38,13 @@ export type GatekeeperActionTarget =
 
 export type GetGatekeeperFn = (gatekeeperId: number) => GatekeeperActionTarget;
 
+type ActionSyncHooks = {
+  applyLegacyAction: (
+      gatekeeper: GatekeeperActionTarget, record: GatekeeperActionRecord) => Promise<void>;
+  persistApproved: (record: GatekeeperActionRecord) => void;
+  persistRejected: (record: GatekeeperActionRecord) => void;
+};
+
 /**
  * A staged manual approval: the user clicked Approve on `action` (a gatekeeper-local action ID),
  * under `resolvedBy`'s authority. Earlier undecided actions go out with it only where an
@@ -113,7 +120,8 @@ export class ActionSyncDriver {
 
   constructor(
       private storage: ActionSyncStorage,
-      private getGatekeeper: GetGatekeeperFn) {}
+      private getGatekeeper: GetGatekeeperFn,
+      private hooks: ActionSyncHooks) {}
 
   /**
    * Reconcile the gatekeeper's queue, optionally staging a manual approval. Resolves with what the
@@ -268,13 +276,13 @@ export class ActionSyncDriver {
       fresh.resolvedBy = attr.resolvedBy;
       fresh.autoApproved = attr.autoApproved;
       delete fresh.failure;
-      this.storage.actions.put(fresh);
+      this.hooks.persistApproved(fresh);
       decided.push(fresh.id);
     };
 
     let {result, undelivered} = await this.#applyThrough(
-        gatekeeperId, frontier, sendVetoes.map(veto => veto.action), [...attribution.keys()],
-        approve);
+        gatekeeperId, frontier, sendVetoes.map(veto => veto.action),
+        pending.filter(record => attribution.has(record.action)), approve);
 
     // Cascade invalidations first: an action inside the frontier can also be cascade-invalidated
     // by a veto delivered in this same pass, and then it was deleted, not applied -- marking it
@@ -298,7 +306,7 @@ export class ActionSyncDriver {
       if (vetoer?.resolvedBy) fresh.resolvedBy = vetoer.resolvedBy;
       fresh.cascadedFrom = vetoer?.id;
       delete fresh.failure;
-      this.storage.actions.put(fresh);
+      this.hooks.persistRejected(fresh);
       decided.push(fresh.id);
     }
 
@@ -353,7 +361,7 @@ export class ActionSyncDriver {
   // apply). Delete this whole method body's fallback half -- and the #legacy cache -- once the
   // fallback warning stops appearing in logs and the method becomes required.
   async #applyThrough(gatekeeperId: number, actionId: number, vetoes: number[],
-                      pendingPlan: number[], approve: (action: number) => void)
+                      pendingPlan: GatekeeperActionRecord[], approve: (action: number) => void)
       : Promise<{result: ApplyActionsThroughResult, undelivered: number[]}> {
     let gatekeeper = this.getGatekeeper(gatekeeperId);
 
@@ -393,16 +401,16 @@ export class ActionSyncDriver {
     // Each approval is persisted as it lands: unlike a replayed frontier, a replayed per-action
     // call throws on an already-applied action, so an unrecorded apply would wedge the record as
     // pending forever.
-    for (let action of pendingPlan) {
+    for (let record of pendingPlan) {
       try {
-        await gatekeeper.applyAction(action);
+        await this.hooks.applyLegacyAction(gatekeeper, record);
       } catch (error) {
         return {result: {stopped: {
-          at: action,
+          at: record.action,
           reason: error instanceof Error ? error : new Error(String(error)),
         }}, undelivered};
       }
-      approve(action);
+      approve(record.action);
     }
     return {result: {}, undelivered};
   }

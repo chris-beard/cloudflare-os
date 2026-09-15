@@ -1,5 +1,5 @@
 // Exercises the push-authorization wiring in the Overseer itself -- submitAction's ancestry
-// verification + marking walk, applyPendingAction's action-scoped GitCache stub and mark
+// verification + marking walk, action-sync's legacy action-scoped GitCache fallback and mark
 // conversion, and removeGatekeeper's queued-push cleanup -- over real SQLite DO storage. The
 // WorkspaceGitCache semantics themselves are covered by git-cache.test.ts on mock storage; this
 // file covers the overseer-side chokepoints those semantics hang off of.
@@ -88,7 +88,7 @@ async function collect(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> 
 }
 
 describe("push authorization through the Overseer chokepoints", () => {
-  it("verifies, marks, applies with an action-scoped cache, and converts marks", async () => {
+  it("verifies, marks, applies through the legacy cache fallback, and converts marks", async () => {
     await inOverseer("push-apply", async impl => {
       let { base, head } = await seedPushableHistory(impl);
 
@@ -109,7 +109,7 @@ describe("push authorization through the Overseer chokepoints", () => {
           sawPack = await collect(await cache.buildPack());
         },
       });
-      await impl.applyPendingAction(record, USER, false);
+      await impl.applyDecidedActions(GATEKEEPER, { action: 1, resolvedBy: USER });
 
       expect((await decodePackBytes(sawPack!, { maxObjectSize: 1 << 20 }))).toHaveLength(1);
       expect(impl.storage.actions.get(record.id)!.state).toBe("approved");
