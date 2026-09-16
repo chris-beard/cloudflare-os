@@ -11,7 +11,11 @@ type ParagraphSpec = {
   bullet?: { listId: string; nestingLevel: number };
 };
 
-type TableSpec = { table: string[][] };
+type TableCellSpec = string | {
+  paragraphs: (Run | string)[][];
+  tableCellStyle?: { rowSpan?: number; columnSpan?: number };
+};
+type TableSpec = { table: TableCellSpec[][] };
 type BlockSpec = ParagraphSpec | TableSpec;
 
 /**
@@ -34,26 +38,9 @@ export function buildTab(
       index = table.endIndex;
       continue;
     }
-    let start = index;
-    let elements: ParagraphElement[] = spec.runs.map(run => {
-      let { text, style } = typeof run === "string" ? { text: run, style: undefined } : run;
-      let runStart = index;
-      index += text.length;
-      return {
-        startIndex: runStart,
-        endIndex: index,
-        textRun: { content: text, textStyle: style ?? {} },
-      };
-    });
-    content.push({
-      startIndex: start,
-      endIndex: index,
-      paragraph: {
-        elements,
-        paragraphStyle: { namedStyleType: spec.namedStyleType ?? "NORMAL_TEXT" },
-        bullet: spec.bullet,
-      },
-    });
+    let paragraph = buildParagraph(index, spec);
+    content.push(paragraph);
+    index = paragraph.endIndex;
   }
 
   return {
@@ -67,30 +54,48 @@ export function buildTab(
   };
 }
 
+function buildParagraph(startIndex: number, spec: ParagraphSpec): StructuralElement {
+  let index = startIndex;
+  let elements: ParagraphElement[] = spec.runs.map(run => {
+    let { text, style } = typeof run === "string" ? { text: run, style: undefined } : run;
+    let runStart = index;
+    index += text.length;
+    return {
+      startIndex: runStart,
+      endIndex: index,
+      textRun: { content: text, textStyle: style ?? {} },
+    };
+  });
+  return {
+    startIndex,
+    endIndex: index,
+    paragraph: {
+      elements,
+      paragraphStyle: { namedStyleType: spec.namedStyleType ?? "NORMAL_TEXT" },
+      bullet: spec.bullet,
+    },
+  };
+}
+
 /** Build a Google Docs table element with the provider's nested index layout. */
-export function buildTable(startIndex: number, rows: string[][]): StructuralElement {
+export function buildTable(startIndex: number, rows: TableCellSpec[][]): StructuralElement {
   let index = startIndex + 1;
   let tableRows = rows.map(row => {
     let rowStart = index++;
-    let tableCells = row.map(text => {
+    let tableCells = row.map(cell => {
       let cellStart = index++;
-      let paragraphStart = index;
-      index += text.length;
+      let paragraphs = typeof cell === "string" ? [[cell]] : cell.paragraphs;
+      let tableCellStyle = typeof cell === "string" ? undefined : cell.tableCellStyle;
+      let content = paragraphs.map(runs => {
+        let paragraph = buildParagraph(index, { runs });
+        index = paragraph.endIndex;
+        return paragraph;
+      });
       return {
         startIndex: cellStart,
         endIndex: index,
-        content: [{
-          startIndex: paragraphStart,
-          endIndex: index,
-          paragraph: {
-            elements: [{
-              startIndex: paragraphStart,
-              endIndex: index,
-              textRun: { content: text, textStyle: {} },
-            }],
-            paragraphStyle: { namedStyleType: "NORMAL_TEXT" },
-          },
-        }],
+        content,
+        ...(tableCellStyle ? { tableCellStyle } : {}),
       };
     });
     return { startIndex: rowStart, endIndex: index, tableCells };

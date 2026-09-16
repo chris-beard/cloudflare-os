@@ -3,7 +3,7 @@
 // to Google Docs batchUpdate operations.
 
 import type {
-  GoogleDocsTab, Paragraph, StructuralElement, Table, TableCell,
+  GoogleDocsTab, Paragraph, StructuralElement, Table, TableCell, TextStyle,
 } from "./docs-api";
 
 // ---------------------------------------------------------------------------
@@ -194,11 +194,22 @@ function tableCellToHtml(cell: TableCell): string {
 function tableCellElementToHtml(element: StructuralElement): string {
   if (element.table) return tableToHtml(element.table);
   if (!element.paragraph) return "";
-  let text = element.paragraph.elements.map(part => {
-    if (part.textRun) return part.textRun.content;
-    return part.horizontalRule ? "---" : "";
-  }).join("").replace(/\n$/, "");
-  return escapeHtml(text);
+  return element.paragraph.elements.map((part, index, elements) => {
+    if (!part.textRun) return part.horizontalRule ? "---" : "";
+    let text = part.textRun.content;
+    if (index === elements.length - 1) text = text.replace(/\n$/, "");
+    return styledTextToHtml(text, part.textRun.textStyle);
+  }).join("");
+}
+
+function styledTextToHtml(text: string, style: TextStyle): string {
+  if (!text) return "";
+  let html = escapeHtml(text);
+  if (style.strikethrough) html = `<s>${html}</s>`;
+  if (style.italic) html = `<em>${html}</em>`;
+  if (style.bold) html = `<strong>${html}</strong>`;
+  if (style.link?.url) html = `<a href="${escapeHtmlAttribute(style.link.url)}">${html}</a>`;
+  return html;
 }
 
 function htmlSpan(name: string, value: number | undefined): string {
@@ -208,6 +219,10 @@ function htmlSpan(name: string, value: number | undefined): string {
 
 function escapeHtml(text: string): string {
   return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function escapeHtmlAttribute(text: string): string {
+  return escapeHtml(text).replaceAll('"', "&quot;");
 }
 
 function indentHtml(text: string, spaces: number): string {

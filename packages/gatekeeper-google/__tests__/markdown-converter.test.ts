@@ -97,6 +97,47 @@ describe("Google Docs tables", () => {
     );
   });
 
+  it("preserves each run's link and text styles in cells", () => {
+    let linked = {
+      text: "Runbook <now>",
+      style: {
+        bold: true,
+        italic: true,
+        strikethrough: true,
+        link: { url: 'https://example.com/runbook?a=1&team="ops"' },
+      },
+    };
+    let tab = buildTab([{ table: [[{
+      paragraphs: [["See ", linked, " today\n"]],
+    }]] }]);
+
+    expect(docTabToMarkdown(tab).markdown).toContain(
+      'See <a href="https://example.com/runbook?a=1&amp;team=&quot;ops&quot;">' +
+      "<strong><em><s>Runbook &lt;now&gt;</s></em></strong></a> today",
+    );
+  });
+
+  it("preserves merged-cell spans", () => {
+    let tab = buildTab([{ table: [[{
+      paragraphs: [["Merged\n"]],
+      tableCellStyle: { rowSpan: 2, columnSpan: 2 },
+    }], []] }]);
+
+    expect(docTabToMarkdown(tab).markdown).toContain(
+      '<td rowspan="2" colspan="2">Merged</td>',
+    );
+  });
+
+  it("separates multiple paragraphs within a cell", () => {
+    let tab = buildTab([{ table: [[{
+      paragraphs: [["First\n"], ["Second\n"]],
+    }]] }]);
+
+    expect(docTabToMarkdown(tab).markdown).toContain(
+      "<td>\n      First<br>\n      Second\n    </td>",
+    );
+  });
+
   it("refuses an edit spanning table structure", () => {
     expect(() => computeReplaceOperations(
       snapshot.sourceMap,

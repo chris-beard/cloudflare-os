@@ -752,7 +752,7 @@ function tabSnapshot(tabId: string, title: string) {
 // the only place the migration refusal can be reached.
 describe("Google Doc edits stored before tab support", () => {
   const snapshot = {
-    formatVersion: 2 as const,
+    formatVersion: 3 as const,
     title: "Test document",
     revisionId: "revision-1",
     tabs: [tabSnapshot(MAIN_TAB, "Main")],
