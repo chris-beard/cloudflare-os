@@ -14,7 +14,11 @@ import type { ListOptions } from "@gadgets/typed-storage";
 import { GitStore, commitIdentityForAuthor, filesEqual, gitObjectsCollection, threeWayMerge }
   from "./git-store";
 import {
-  EAGER_BLOB_LIMIT, GitCacheImpl, WorkspaceGitCache, gitObjectMetadataCollection,
+  EAGER_BLOB_LIMIT,
+  GitCacheImpl,
+  GitPackBuilderImpl,
+  WorkspaceGitCache,
+  gitObjectMetadataCollection,
 } from "./git-cache";
 import { migrateCodeLogToGit } from "./git-migration";
 import * as Y from "yjs";
@@ -2014,6 +2018,10 @@ class OverseerImpl implements AgentHooks {
 
     this.#actionSync = new ActionSyncDriver(
         this.storage, gatekeeperId => this.getGatekeeperFacet(gatekeeperId), {
+          createGitPackBuilder: (gatekeeperId, pendingPlan) =>
+            pendingPlan.some(record => (record.description.pushedCommits?.length ?? 0) > 0)
+              ? new GitPackBuilderImpl(this.gitCache, this.storage, gatekeeperId, pendingPlan)
+              : undefined,
           applyLegacyAction: (gatekeeper, record) => gatekeeper.applyAction(record.action,
               new GitCacheImpl(this.gitCache, record.gatekeeperId, record.id)),
           persistApproved: record => this.storage.transaction(() => {

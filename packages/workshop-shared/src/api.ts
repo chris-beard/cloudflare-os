@@ -27,6 +27,7 @@ import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
+import { codedErrorFamily } from "./coded-errors.js";
 
 export const SERVICE_SALT = new Uint8Array([
   0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
@@ -327,21 +328,6 @@ export interface ObserverConfigCallback extends RpcTarget {
   configure(needs: ObserverBindingNeed[]): Promise<ObserverAccountChoice[]>;
 }
 
-/** Builds the create/read helpers for a family of expected errors carrying stable
- * machine-readable codes. The per-code messages double as the classification fallback for errors
- * from older deployments that lost the code in transit, so changing one is a compatibility break. */
-function codedErrorFamily<Code extends string>(messages: Record<Code, string>) {
-  const codes = new Set<unknown>(Object.keys(messages));
-  return {
-    create: (code: Code): Error & { code: Code } =>
-        Object.assign(new Error(messages[code]), { code }),
-    getCode: (error: unknown): Code | undefined => {
-      const candidate = typeof error === "object" && error !== null && "code" in error
-          ? error.code : undefined;
-      return codes.has(candidate) ? candidate as Code : undefined;
-    },
-  };
-}
 
 /** Stable error codes attached to expected failures from `AuthenticatedApi.openGadget()`. */
 export const OPEN_GADGET_ERROR_CODES = {

@@ -2,7 +2,19 @@
 // the real Durable Objects and callbacks) plus test-only entrypoints that stand in for other Workers.
 
 import { DurableObject, WorkerEntrypoint, restore } from "cloudflare:workers";
-import type { AccountDescription } from "@gadgets/workshop-shared/gatekeeper";
+import type { RpcStub } from "cloudflare:workers";
+import { validateRpc } from "capnweb-validate";
+import type {
+  AccountDescription,
+  ApplyActionsThroughResult,
+  Gatekeeper,
+  GitPackBuilder,
+} from "@gadgets/workshop-shared/gatekeeper";
+import {
+  createGitPackError,
+  getGitPackErrorCode,
+  GIT_PACK_ERROR_CODES,
+} from "@gadgets/workshop-shared/gatekeeper";
 import { GatekeeperConnectCallbackImpl } from "../src/user.js";
 import { LoginConnectCallbackImpl } from "../src/auth/login-flow.js";
 import { OverseerDurableObject as RealOverseerDurableObject } from "../src/server.js";
@@ -50,6 +62,74 @@ export { GatekeeperLoopback, GadgetTailLoopback } from "../src/server.js";
 export class TestConnectCallback extends GatekeeperConnectCallbackImpl {}
 /** The sign-in callback, reachable the same way. */
 export class TestLoginCallback extends LoginConnectCallbackImpl {}
+
+type TestGitPackGatekeeperProps = {
+  packAction?: number;
+  stoppedAt?: number;
+  throwAfterBuild?: boolean;
+};
+
+/** Native-RPC test receiver for invocation-scoped Git pack callbacks. */
+@validateRpc()
+export class TestGitPackGatekeeper
+    extends DurableObject<Cloudflare.Env, TestGitPackGatekeeperProps>
+    implements Pick<Gatekeeper<unknown>, "applyActionsThrough"> {
+  #captured?: Uint8Array;
+  #retained?: RpcStub<GitPackBuilder>;
+
+  async applyActionsThrough(
+    actionId: number,
+    vetoes: number[],
+    gitPacks?: RpcStub<GitPackBuilder>,
+  ): Promise<ApplyActionsThroughResult> {
+    const { packAction, stoppedAt, throwAfterBuild } = this.ctx.props;
+    if (packAction === undefined) return {};
+    if (gitPacks === undefined) {
+      return { stopped: {
+        at: packAction,
+        reason: createGitPackError(GIT_PACK_ERROR_CODES.unavailable),
+      } };
+    }
+
+    this.#retained?.[Symbol.dispose]();
+    this.#retained = gitPacks.dup();
+    try {
+      const stream = await this.#retained.buildPack(packAction);
+      this.#captured = new Uint8Array(await new Response(stream).arrayBuffer());
+    } catch (error) {
+      const code = getGitPackErrorCode(error);
+      if (code !== undefined) {
+        return { stopped: {
+          at: packAction,
+          reason: error instanceof Error ? error : createGitPackError(code),
+        } };
+      }
+      throw error;
+    }
+
+    if (throwAfterBuild) throw new Error("Test batch response lost.");
+    if (stoppedAt !== undefined) {
+      return { stopped: { at: stoppedAt, reason: new Error("Test action stopped.") } };
+    }
+    return {};
+  }
+
+  async capturedPack(): Promise<Uint8Array> {
+    if (this.#captured === undefined) throw new Error("No pack was captured.");
+    return this.#captured;
+  }
+
+  async buildRetained(action: number): Promise<Uint8Array> {
+    if (this.#retained === undefined) throw new Error("No Git pack builder was retained.");
+    const stream = await this.#retained.buildPack(action);
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
+  async releaseRetained(): Promise<void> {
+    this.#retained?.[Symbol.dispose]();
+    this.#retained = undefined;
+  }
+}
 
 /** What each FakeGatekeeperAccount has been asked to do, by its `name` prop. */
 const accountCalls = new Map<string, string[]>();

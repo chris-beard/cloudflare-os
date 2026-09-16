@@ -8,6 +8,11 @@ import type {
 } from "../src/overseer.js";
 import type { AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
 import type { ApplyActionsThroughResult } from "@gadgets/workshop-shared/gatekeeper";
+import {
+  createGitPackError,
+  getGitPackErrorCode,
+  GIT_PACK_ERROR_CODES,
+} from "@gadgets/workshop-shared/gatekeeper";
 import { makeActionStorage as makeStorage, openFakeOverseer } from "./fixtures.js";
 
 vi.mock("capnweb-validate", () => ({ validateRpc: () => () => undefined }));
@@ -112,6 +117,7 @@ function makeLegacyGatekeeper(opts: {remote?: boolean, failApply?: number[]} = {
 
 function makeDriver(storage: ActionSyncStorage, target: GatekeeperActionTarget) {
   return new ActionSyncDriver(storage, () => target, {
+    createGitPackBuilder: () => undefined,
     applyLegacyAction: async (gatekeeper, record) => {
       let apply = gatekeeper.applyAction as unknown as (action: number) => Promise<void>;
       await apply(record.action);
@@ -593,6 +599,26 @@ describe("ActionSyncDriver legacy fallback", () => {
     expect((error as Error).message).toContain('does not implement "applyActionsThrough"');
     expect(isMethodMissing(error)).toBe(true);
   });
+  it("does not replay a coded batch failure whose message resembles method-missing prose",
+     async () => {
+    let storage = makeStorage();
+    putAction(storage, 1, { autoApprovable: false });
+    let { target, results } = makeBatchGatekeeper();
+    let failure = createGitPackError(GIT_PACK_ERROR_CODES.builderExpired);
+    failure.message = 'The RPC receiver does not implement "applyActionsThrough".';
+    results.push(failure);
+
+    let caught: unknown;
+    try {
+      await makeDriver(storage, target).apply(GK, { action: 1, resolvedBy: APPROVER });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(getGitPackErrorCode(caught)).toBe(GIT_PACK_ERROR_CODES.builderExpired);
+    expect(getAction(storage, 1).state).toBe("pending");
+  });
+
   it("falls back on workerd's method-missing TypeError, delivering vetoes then applies in " +
      "ascending order, and probes only once", async () => {
     let storage = makeStorage();

@@ -14,7 +14,12 @@
 
 import type { Collection, NonUniqueIndex } from "@gadgets/typed-storage";
 import type { AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
-import type { ApplyActionsThroughResult, Gatekeeper } from "@gadgets/workshop-shared/gatekeeper";
+import type {
+  ApplyActionsThroughResult,
+  Gatekeeper,
+  GitPackBuilder,
+} from "@gadgets/workshop-shared/gatekeeper";
+import { getGitPackErrorCode } from "@gadgets/workshop-shared/gatekeeper";
 import { createWorkshopLogger } from "./observability";
 import type { ActionRecord, AutoApproveTagRecord, GatekeeperActionRecord } from "./overseer.js";
 
@@ -39,6 +44,10 @@ export type GatekeeperActionTarget =
 export type GetGatekeeperFn = (gatekeeperId: number) => GatekeeperActionTarget;
 
 type ActionSyncHooks = {
+  createGitPackBuilder: (
+    gatekeeperId: number,
+    pendingPlan: readonly GatekeeperActionRecord[],
+  ) => (GitPackBuilder & Disposable) | undefined;
   applyLegacyAction: (
       gatekeeper: GatekeeperActionTarget, record: GatekeeperActionRecord) => Promise<void>;
   persistApproved: (record: GatekeeperActionRecord) => void;
@@ -72,14 +81,14 @@ type StagedPass = {
 };
 
 /**
- * Returns whether `error` is workerd's missing-`applyActionsThrough` RPC error.
+ * Returns whether `error` is workerd's code-less missing-`applyActionsThrough` RPC error.
  *
- * Production workerd includes `the method` in this error; Miniflare's real DO stub omits it. The
- * error is untyped after the RPC hop (only the message survives), so both runtime variants are
- * matched narrowly and retain the method name.
+ * Production workerd includes `the method` in this error; Miniflare's real DO stub omits it.
+ * Neither runtime attaches a code, so these two migration-only message forms remain the narrow
+ * compatibility probe. Recognized application codes are authoritative and never trigger replay.
  */
 export function isMethodMissing(error: unknown): boolean {
-  return error instanceof Error && (
+  return getGitPackErrorCode(error) === undefined && error instanceof Error && (
     error.message.includes('does not implement the method "applyActionsThrough"') ||
     error.message.includes('does not implement "applyActionsThrough"'));
 }
@@ -361,14 +370,19 @@ export class ActionSyncDriver {
   // apply). Delete this whole method body's fallback half -- and the #legacy cache -- once the
   // fallback warning stops appearing in logs and the method becomes required.
   async #applyThrough(gatekeeperId: number, actionId: number, vetoes: number[],
-                      pendingPlan: GatekeeperActionRecord[], approve: (action: number) => void)
+                      pendingPlan: readonly GatekeeperActionRecord[],
+                      approve: (action: number) => void)
       : Promise<{result: ApplyActionsThroughResult, undelivered: number[]}> {
     let gatekeeper = this.getGatekeeper(gatekeeperId);
 
     if (!this.#legacy.has(gatekeeperId)) {
       try {
         if (typeof gatekeeper.applyActionsThrough === "function") {
-          return {result: await gatekeeper.applyActionsThrough(actionId, vetoes), undelivered: []};
+          using gitPacks = this.hooks.createGitPackBuilder(gatekeeperId, pendingPlan);
+          return {
+            result: await gatekeeper.applyActionsThrough(actionId, vetoes, gitPacks),
+            undelivered: [],
+          };
         }
       } catch (error) {
         if (!isMethodMissing(error)) throw error;

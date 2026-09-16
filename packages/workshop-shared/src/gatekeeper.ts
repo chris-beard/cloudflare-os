@@ -17,6 +17,7 @@
 // `Adapter` type is the root interface implemented by the service binding.
 
 import type { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
+import { codedErrorFamily } from "./coded-errors.js";
 
 /**
  * A pagination cursor.
@@ -774,9 +775,9 @@ export interface ApplyActionsThroughResult {
     at: number;
 
     /**
-     * Explanation of why application stopped. Only the error's `message` survives the RPC hop,
-     * so it must stand alone as display-safe text, specific enough for the user to resolve the
-     * problem.
+     * Explanation of why application stopped. Expected native-RPC errors may retain an own stable
+     * `code`, but the message must stand alone as display-safe text because the backend persists
+     * only that bounded presentation string.
      */
     reason: Error;
   };
@@ -966,6 +967,12 @@ export interface Gatekeeper<Session> extends DurableObject {
    * Every action ID in `vetoes` must be less than or equal to `actionId`. A veto may arrive long
    * after the user rejected the action; delivery is opportunistic, not prompt.
    *
+   * `gitPacks`, when present, can build packs only for declared push actions authorized in this
+   * invocation. A gatekeeper that needs a pack but receives no capability must return `stopped` at
+   * that action before external side effects. A recognized coded `buildPack()` rejection must be
+   * caught around that action and returned as `stopped`; unknown failures propagate. A durably
+   * completed push is an idempotent no-op and does not need another pack.
+   *
    * Depending on policy conditions, actions may be approved and applied automatically. However,
    * the gatekeeper is nevertheless expected to submit all actions for approval; there is no mode
    * in which it's OK to skip the check.
@@ -973,7 +980,8 @@ export interface Gatekeeper<Session> extends DurableObject {
    * Calls must be idempotent. Missing IDs and vetoes of unknown or already-applied actions are
    * ignored. A repeated request must re-report persisted invalidations attributable to its vetoes.
    */
-  applyActionsThrough?(actionId: number, vetoes: number[]): Promise<ApplyActionsThroughResult>;
+  applyActionsThrough?(actionId: number, vetoes: number[],
+                       gitPacks?: RpcStub<GitPackBuilder>): Promise<ApplyActionsThroughResult>;
 
   /**
    * Applies one approved action using a Git cache scoped to that action. Implementations should
@@ -1321,14 +1329,14 @@ export type ActionDescription = {
    * will cause `submitAction()` to throw an exception.
    *
    * Even when the action is successfully submitted, the Gatekeeper is obliged -- as always -- not
-   * to actually transmit any data until the action is approved and applied with `applyAction()`.
-   * As always, though, the Gatekeeper is expected to simulate the effects of the action
-   * immediately. E.g. if the agent queries the state of the remote repo, the Gatekeeper should
-   * indicate that the push has completed.
+   * to actually transmit any data until the action is approved and applied with `applyAction()` or
+   * `applyActionsThrough()`. As always, though, the Gatekeeper is expected to simulate the effects
+   * of the action immediately. E.g. if the agent queries the state of the remote repo, the
+   * Gatekeeper should indicate that the push has completed.
    *
-   * In order to assist in simulation, the `GitCache` passed to the Gatekeeper will always provide
-   * access to all objects which are pending a push (part of a submitted but not-yet-applied
-   * action). See `GitCache` for more info.
+   * The `GitCache` available to the Gatekeeper provides access to all objects pending a push. At
+   * application time, `GitCache.buildPack()` serves the legacy single-action path and
+   * `GitPackBuilder.buildPack()` serves the batch path.
    */
   pushedCommits?: GitOid[];
 
@@ -1487,6 +1495,53 @@ export type GitOid = string;
  * workspaces but is included here because it is one of the four git object types.)
  */
 export type GitObjectType = "commit" | "tree" | "blob" | "tag";
+
+/** Stable error codes for expected failures from `GitPackBuilder.buildPack()`. */
+export const GIT_PACK_ERROR_CODES = {
+  /** The apply-through receiver needed a pack but received no builder capability. */
+  unavailable: "GIT_PACK_UNAVAILABLE",
+  /** The invocation that owned the builder has completed. */
+  builderExpired: "GIT_PACK_BUILDER_EXPIRED",
+  /** The selected action was not an authorized declared push in this invocation. */
+  actionNotAuthorized: "GIT_PACK_ACTION_NOT_AUTHORIZED",
+  /** The selected action is no longer pending or its gatekeeper connection was removed. */
+  actionUnavailable: "GIT_PACK_ACTION_UNAVAILABLE",
+} as const;
+
+/** An expected `GitPackBuilder.buildPack()` failure code. */
+export type GitPackErrorCode =
+    typeof GIT_PACK_ERROR_CODES[keyof typeof GIT_PACK_ERROR_CODES];
+
+const gitPackErrors = codedErrorFamily<GitPackErrorCode>({
+  [GIT_PACK_ERROR_CODES.unavailable]: "Git pack building is unavailable for this action.",
+  [GIT_PACK_ERROR_CODES.builderExpired]: "Git pack builder is no longer active.",
+  [GIT_PACK_ERROR_CODES.actionNotAuthorized]:
+      "Action is not authorized for Git pack building in this apply-through call.",
+  [GIT_PACK_ERROR_CODES.actionUnavailable]:
+      "Git pack action is no longer pending or its connection was removed.",
+});
+
+/** Creates an expected Git pack failure carrying its stable machine-readable code. */
+export const createGitPackError: (
+  code: GitPackErrorCode,
+) => Error & { code: GitPackErrorCode } = gitPackErrors.create;
+
+/** Classifies an expected Git pack failure by recognized `code` only. */
+export const getGitPackErrorCode: (error: unknown) => GitPackErrorCode | undefined =
+    gitPackErrors.getCode;
+
+/**
+ * Invocation-scoped native-RPC capability for building packs for authorized declared pushes.
+ */
+export interface GitPackBuilder extends RpcTarget {
+  /**
+   * Builds a pack for one gatekeeper-local action ID authorized in the containing apply-through
+   * call. The selected action need not equal that call's frontier. A valid push whose full closure
+   * is already known to the remote returns a valid empty pack. Expected availability and authority
+   * failures carry a code from `GIT_PACK_ERROR_CODES`.
+   */
+  buildPack(action: number): Promise<ReadableStream<Uint8Array>>;
+}
 
 /**
  * Interface to the workspace's git object cache, as exposed to one gatekeeper.
