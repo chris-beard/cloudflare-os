@@ -1,0 +1,104 @@
+# Downstream CI for the fabric distro.
+#
+# A NEW filename on purpose: upstream's nine workflow files stay byte-identical so they never
+# conflict on a merge, and upstream will never create a file by this name. Upstream's own ci.yml
+# triggers only on push to `main`, so it does not run on `distro` at all -- without this file the
+# fork has no CI whatsoever.
+name: fabric-ci
+
+on:
+  push:
+    branches: [distro, upstream-main]
+  pull_request:
+    branches: [distro]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fabric-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Pinned, not ">=". The version lives only in upstream's ci.yml NODE_VERSION -- package.json
+      # declares no engines -- and Node 26 fails 22 frontend tests because jsdom's localStorage is
+      # absent. Read it from upstream's own workflow so a bump there reaches us.
+      - name: Resolve upstream's pinned Node version
+        id: node
+        run: |
+          version="$(grep -E '^\s*NODE_VERSION:' .github/workflows/ci.yml \
+            | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          test -n "$version" || { echo "NODE_VERSION not found in ci.yml"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Using Node $version"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      # Gate A: upstream's own suite, unmodified.
+      - run: pnpm run build
+      - run: pnpm test
+
+  invariants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Gate J: divergence budget. The health metric for this fork is the FILE LIST, not the
+      # conflict count -- a trial merge across a 105-commit gap produced only 2 textual conflicts
+      # while the kernel rewrote 77-83% of its lines, so conflicts are a lying green light.
+      - name: Divergence budget
+        run: |
+          git fetch -q origin upstream-main
+          unexpected="$(git diff --name-only origin/upstream-main...HEAD \
+            | grep -vE '^packages/[^/]+/__tests__/fabric-' \
+            | grep -vE '^\.github/workflows/fabric-ci\.yml$' \
+            | grep -vE '^(PATCHES|DOWNSTREAM-REVIEW)\.md$' \
+            | grep -vE '^packages/workshop-backend/src/fabric/' || true)"
+          if [ -n "$unexpected" ]; then
+            echo "::error::Files diverge from upstream outside the patch budget:"
+            echo "$unexpected"
+            echo "Every kernel patch needs a PATCHES.md entry and a PATCH-ID trailer."
+            exit 1
+          fi
+          echo "Divergence within budget."
+
+      # Gate B: test-file superset. Upstream ships its enforcement tests WITH the confinement fix
+      # (#380 added 5 test files alongside an authorization change), so a test file that exists
+      # upstream and not here means a security fix arrived unmerged.
+      - name: Test-file superset
+        run: |
+          git fetch -q origin upstream-main
+          missing="$(comm -23 \
+            <(git ls-tree -r --name-only origin/upstream-main | grep -E '__tests__/.*\.test\.tsx?$' | sort) \
+            <(git ls-tree -r --name-only HEAD | grep -E '__tests__/.*\.test\.tsx?$' | sort))"
+          if [ -n "$missing" ]; then
+            echo "::error::Upstream test files missing from distro:"; echo "$missing"; exit 1
+          fi
+          echo "Test files are a superset of upstream's."
+
+      # Gate: the fabric probes must never be skipped. They are the only capability this fork has
+      # that a plain starter does not; a silenced probe is the documented kill criterion.
+      - name: Probes are not skipped
+        run: |
+          if grep -rnE '\b(it|test|describe)\.(skip|todo)\b' \
+              packages/*/__tests__/fabric-*.test.ts 2>/dev/null; then
+            echo "::error::A fabric invariant probe is skipped."; exit 1
+          fi
+          echo "No fabric probe is skipped."
