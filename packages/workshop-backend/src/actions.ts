@@ -289,9 +289,18 @@ export class ActionSyncDriver {
       decided.push(fresh.id);
     };
 
-    let {result, undelivered} = await this.#applyThrough(
+    // Acknowledge each legacy veto as soon as its RPC returns, before another call can fail. The
+    // batch path invokes this only after its all-vetoes-durable call returns successfully.
+    let acknowledgeVeto = (action: number) => {
+      let fresh = this.#freshAction(byAction, action);
+      if (!fresh?.vetoPending) return;
+      delete fresh.vetoPending;
+      this.storage.actions.put(fresh);
+    };
+
+    let result = await this.#applyThrough(
         gatekeeperId, frontier, sendVetoes.map(veto => veto.action),
-        pending.filter(record => attribution.has(record.action)), approve);
+        pending.filter(record => attribution.has(record.action)), approve, acknowledgeVeto);
 
     // Cascade invalidations first: an action inside the frontier can also be cascade-invalidated
     // by a veto delivered in this same pass, and then it was deleted, not applied -- marking it
@@ -340,16 +349,9 @@ export class ActionSyncDriver {
       }
     }
 
-    // Sent vetoes are delivered even on a `stopped` result (gatekeepers process vetoes before
-    // applying), so clear the staging flag on every one that landed.
-    for (let veto of sendVetoes) {
-      if (undelivered.includes(veto.action)) continue;
-      let fresh = this.#freshAction(byAction, veto.action);
-      if (fresh?.vetoPending) {
-        delete fresh.vetoPending;
-        this.storage.actions.put(fresh);
-      }
-    }
+    // A returned batch call durably delivered every veto. Legacy vetoes were already checkpointed
+    // one by one, so this is an idempotent no-op for them.
+    for (let veto of sendVetoes) acknowledgeVeto(veto.action);
 
     return {decided, blockedBy};
   }
@@ -365,24 +367,21 @@ export class ActionSyncDriver {
   }
 
   // Batch call with a legacy fallback for gatekeepers that predate applyActionsThrough -- which
-  // is still all of them. Returns the pass result plus any vetoes that provably never reached the
-  // gatekeeper (none, on the batch path: the contract requires vetoes to be durable before any
-  // apply). Delete this whole method body's fallback half -- and the #legacy cache -- once the
-  // fallback warning stops appearing in logs and the method becomes required.
+  // is still all of them. The fallback checkpoints each veto before attempting the next call and
+  // aborts before any apply when a rejection fails. Delete the fallback half -- and the #legacy
+  // cache -- once the fallback warning stops appearing in logs and the method becomes required.
   async #applyThrough(gatekeeperId: number, actionId: number, vetoes: number[],
                       pendingPlan: readonly GatekeeperActionRecord[],
-                      approve: (action: number) => void)
-      : Promise<{result: ApplyActionsThroughResult, undelivered: number[]}> {
+                      approve: (action: number) => void,
+                      acknowledgeVeto: (action: number) => void)
+      : Promise<ApplyActionsThroughResult> {
     let gatekeeper = this.getGatekeeper(gatekeeperId);
 
     if (!this.#legacy.has(gatekeeperId)) {
       try {
         if (typeof gatekeeper.applyActionsThrough === "function") {
           using gitPacks = this.hooks.createGitPackBuilder(gatekeeperId, pendingPlan);
-          return {
-            result: await gatekeeper.applyActionsThrough(actionId, vetoes, gitPacks),
-            undelivered: [],
-          };
+          return await gatekeeper.applyActionsThrough(actionId, vetoes, gitPacks);
         }
       } catch (error) {
         if (!isMethodMissing(error)) throw error;
@@ -394,23 +393,20 @@ export class ActionSyncDriver {
     }
 
     // Legacy path: per-action calls in the same order the batch would use -- vetoes first, then
-    // pending actions ascending. `{restart}` returns are discarded, as the overseer always has,
-    // and this path never reports `invalidatedByVeto`, so an un-migrated gatekeeper's cascades
-    // leave their dependants pending until they too are decided.
-    let undelivered: number[] = [];
+    // pending actions ascending. Each confirmed veto is checkpointed immediately; a failed veto
+    // aborts the pass before any action can be applied. `{restart}` returns are discarded, as the
+    // overseer always has, and this path never reports `invalidatedByVeto`, so an un-migrated
+    // gatekeeper's cascades leave their dependants pending until they too are decided.
     for (let veto of vetoes) {
       try {
         await gatekeeper.rejectAction(veto);
       } catch (error) {
-        // The error cannot distinguish "already gone" from "never arrived", so the veto stays
-        // staged: re-sending one the gatekeeper has settled is harmless, while dropping one it
-        // never saw would let a later frontier apply the action the user rejected. A migrated
-        // gatekeeper ignores unknown vetoes, so the retry stops costing anything then.
-        undelivered.push(veto);
         logger.warn("legacy rejectAction failed", {
           event: "action.sync.legacy.reject.failed", gatekeeperId, error,
         });
+        throw error;
       }
+      acknowledgeVeto(veto);
     }
     // Each approval is persisted as it lands: unlike a replayed frontier, a replayed per-action
     // call throws on an already-applied action, so an unrecorded apply would wedge the record as
@@ -419,13 +415,13 @@ export class ActionSyncDriver {
       try {
         await this.hooks.applyLegacyAction(gatekeeper, record);
       } catch (error) {
-        return {result: {stopped: {
+        return {stopped: {
           at: record.action,
           reason: error instanceof Error ? error : new Error(String(error)),
-        }}, undelivered};
+        }};
       }
       approve(record.action);
     }
-    return {result: {}, undelivered};
+    return {};
   }
 }

@@ -675,25 +675,25 @@ describe("ActionSyncDriver legacy fallback", () => {
     expect(getAction(storage, 3).state).toBe("pending");
   });
 
-  it("keeps a veto staged when a legacy reject throws, and still applies the rest", async () => {
+  it("checkpoints delivered legacy vetoes and applies nothing when a later veto fails", async () => {
     let storage = makeStorage();
     enableRule(storage);
     putAction(storage, 1, { state: "rejected", vetoPending: true, resolvedBy: REJECTER });
-    putAction(storage, 2);
+    putAction(storage, 2, { state: "rejected", vetoPending: true, resolvedBy: REJECTER });
+    putAction(storage, 3);
 
     let legacy = makeLegacyGatekeeper();
     legacy.target.rejectAction = (async (action: number) => {
       legacy.calls.push(`reject:${action}`);
-      throw new Error("already settled");
+      if (action === 2) throw new Error("reject 2 failed");
     }) as typeof legacy.target.rejectAction;
-    await makeDriver(storage, legacy.target).apply(GK);
 
-    // The error can't say whether the gatekeeper ever saw the rejection, so it is re-sent on the
-    // next pass rather than dropped: a lost veto would let a later frontier apply the action the
-    // user rejected. Re-sending a settled veto is harmless.
-    expect(getAction(storage, 1).vetoPending).toBe(true);
-    expect(legacy.calls).toEqual(["reject:1", "apply:2"]);
-    expect(getAction(storage, 2).state).toBe("approved");
+    await expect(makeDriver(storage, legacy.target).apply(GK)).rejects.toThrow("reject 2 failed");
+
+    expect(getAction(storage, 1).vetoPending).toBeUndefined();
+    expect(getAction(storage, 2).vetoPending).toBe(true);
+    expect(legacy.calls).toEqual(["reject:1", "reject:2"]);
+    expect(getAction(storage, 3).state).toBe("pending");
   });
 
   it("records each legacy approval before issuing the next external call", async () => {
