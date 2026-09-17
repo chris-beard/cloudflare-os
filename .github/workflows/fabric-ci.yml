@@ -60,24 +60,31 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Gate J: divergence budget. The health metric for this fork is the FILE LIST, not the
-      # conflict count -- a trial merge across a 105-commit gap produced only 2 textual conflicts
-      # while the kernel rewrote 77-83% of its lines, so conflicts are a lying green light.
-      - name: Divergence budget
+      # Gate J: the patch ledger. The health metric for this fork is the FILE LIST, not the conflict
+      # count -- a trial merge across a 105-commit gap produced only 2 textual conflicts while the
+      # kernel rewrote 77-83% of its lines, so conflicts are a lying green light.
+      #
+      # Every file that differs from upstream must be a downstream-only file or be claimed by a
+      # PATCH-ID commit that PATCHES.md explains. A static allowlist could not tell a recorded patch
+      # from an unrecorded one; this reads both records and requires them to agree, caps the series
+      # at three, and refuses patches to the forbidden kernel files.
+      #
+      # The ledger script is TypeScript run directly by node, which needs native type stripping --
+      # so pin the same Node the suite uses rather than inherit the runner's default.
+      - name: Resolve upstream's pinned Node version
+        id: node
+        run: |
+          version="$(grep -E '^\s*NODE_VERSION:' .github/workflows/ci.yml \
+            | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          test -n "$version" || { echo "NODE_VERSION not found in ci.yml"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+      - name: Patch ledger
         run: |
           git fetch -q origin upstream-main
-          unexpected="$(git diff --name-only origin/upstream-main...HEAD \
-            | grep -vE '^packages/[^/]+/__tests__/fabric-' \
-            | grep -vE '^\.github/workflows/fabric-ci\.yml$' \
-            | grep -vE '^(PATCHES|DOWNSTREAM-REVIEW)\.md$' \
-            | grep -vE '^packages/workshop-backend/src/fabric/' || true)"
-          if [ -n "$unexpected" ]; then
-            echo "::error::Files diverge from upstream outside the patch budget:"
-            echo "$unexpected"
-            echo "Every kernel patch needs a PATCHES.md entry and a PATCH-ID trailer."
-            exit 1
-          fi
-          echo "Divergence within budget."
+          node scripts/fabric-patch-ledger.ts origin/upstream-main
 
       # Gate B: test-file superset. Upstream ships its enforcement tests WITH the confinement fix
       # (#380 added 5 test files alongside an authorization change), so a test file that exists
