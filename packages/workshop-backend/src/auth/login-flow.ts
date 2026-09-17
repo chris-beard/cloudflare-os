@@ -219,7 +219,28 @@ export class LoginConnectCallbackImpl
       // Closed signups block first-time account creation here too (not just password signup); an
       // existing user signing in is unaffected.
       const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
-      const secret = await userStub.loginOrCreateViaGatekeeper(email, signupsEnabled);
+      // FABRIC PATCH (fabric-display-name): ask the gatekeeper what to call this person.
+      //
+      // Upstream seeds the display name from the identity string's local-part, which assumes that
+      // string is an email address. This deployment keys accounts on an opaque, stable WorkOS user
+      // id instead (so an email change cannot strand a user, and the personal identifier stays out
+      // of the DO name), and an opaque id has no local-part -- every account would be created named
+      // "user_01KG8V3HVEF295G2GVXSVHBCA5".
+      //
+      // describe() is already part of the GatekeeperUser contract and every vendor implements it,
+      // so this asks for something the account can always answer. Failure is non-fatal: a missing
+      // or unusable name falls back to upstream's behaviour rather than blocking sign-in.
+      let displayName: string | undefined;
+      try {
+        const described = await account.describe();
+        const named = described?.displayName?.trim();
+        if (named) displayName = named;
+      } catch (err) {
+        loginLogger.info("gatekeeper did not supply a display name", {
+          event: "gatekeeper.login.describe_failed", error: err,
+        });
+      }
+      const secret = await userStub.loginOrCreateViaGatekeeper(email, signupsEnabled, displayName);
       if (secret === null) {
         loginLogger.info("gatekeeper login finished", {
           event: "gatekeeper.login.finished", outcome: "signups_disabled",

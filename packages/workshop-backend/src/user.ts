@@ -473,13 +473,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * When the account doesn't yet exist and `allowCreate` is false (deployment signups are closed),
    * returns null instead of creating one — existing users can still sign in.
    */
-  async loginOrCreateViaGatekeeper(email: string, allowCreate: boolean): Promise<string | null> {
+  async loginOrCreateViaGatekeeper(email: string, allowCreate: boolean, displayName?: string)
+      : Promise<string | null> {
     if (!this.storage.created.get()) {
       if (!allowCreate) return null;
       this.storage.created.put(true);
       this.storage.profile.put({
         type: "user",
-        name: email.split("@")[0],
+        // FABRIC PATCH (fabric-display-name): prefer the gatekeeper's name.
+        //
+        // `email.split("@")[0]` assumes the identity string is an email address. When it is an
+        // opaque principal -- which is how this deployment keys accounts -- there is no local-part
+        // and the whole id becomes the display name. Optional and last-resort-compatible: callers
+        // that pass nothing keep upstream's exact behaviour.
+        name: displayName?.trim() || email.split("@")[0],
         id: email,
       });
     }
