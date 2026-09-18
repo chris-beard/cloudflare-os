@@ -4,21 +4,26 @@ Every commit on `distro` that modifies an upstream file is recorded here and car
 `PATCH-ID` trailer. CI asserts the two agree, and that `git diff --name-only upstream-main...distro`
 lists nothing but these files plus new-file-only paths.
 
-**The budget is three. It is currently full.** A fourth patch, or any patch landing in
-`overseer.ts`, `agent.ts`, `server.ts`, `ai-models.ts`, `workshop-shared/src/api.ts` or
-`workshop-frontend/`, is the documented signal to stop and re-scope — at that point this is not a
-fork with patches, it is an unfunded rewrite of someone else's kernel.
+**The budget is ten patches. Four are committed: two landed, two planned, six free.** (Raised from
+three on 2026-09-17, deliberately: carrying a set of patches is expected of this distro, and the
+discipline is to keep each one justified rather than to keep the count artificially small. A patch
+earns its place by directly supporting what Fabric offers that upstream does not.)
 
-> **That signal has fired.** `fabric-popupless-signin` (2026-09-17) is the fourth patch and lands in
-> two of the named files, `server.ts` and `workshop-shared/src/api.ts`. It was authorised
-> deliberately, for a reason recorded in its entry below, and the budget question it raises is open
-> rather than settled: either this replaces one of the two unlanded patches, or the budget is
-> larger than three and should say so. Do not treat this precedent as the rule relaxing by itself.
+The count is the cheap half of the rule. Six files cost more than a slot: `overseer.ts`, `agent.ts`,
+`server.ts`, `ai-models.ts`, `workshop-shared/src/api.ts`, `workshop-frontend/`. A patch landing in
+one of them is not forbidden — `fabric-popupless-signin` took two on purpose — but it has to say why
+no seam reaches, and it should expect to be re-read on every merge rather than carried unexamined.
 
-Why so strict: upstream refuses outside contributions (CONTRIBUTING.md) and closed an outside
-security report unmerged, so every line here is permanent divergence with no upstream path. Upstream
-also rewrote 77–83% of its hottest kernel files in a four-week window, so a patch's cost is not its
-size but how often the code under it moves.
+What actually keeps this small is per-patch, not per-budget: every entry states what no seam reaches,
+what would retire it, and where its tests live (a file of its own, so a patch adds conflict surface
+only where its behaviour does). A patch whose `REVIEW-IF` has fired is a patch to re-derive or drop,
+not to re-merge.
+
+Why any of this is strict when the budget is not: upstream refuses outside contributions
+(CONTRIBUTING.md) and closed an outside security report unmerged, so every line here is permanent
+divergence with no upstream path. Upstream also rewrote 77–83% of its hottest kernel files in a
+four-week window, so a patch's cost is not its size but how often the code under it moves — which is
+why ten slots is not permission to spend ten.
 
 Each entry states what no seam reaches, because "could this have been a wrapper?" is the question to
 re-ask on every merge.
@@ -125,5 +130,6 @@ or upstream adds a redirect-based sign-in — which would retire this patch outr
 it adds no conflict surface): the release, a wrong ticket refused without spending the result, and an
 attempt the gatekeeper has not answered.
 
-**Budget note:** this is the fourth patch and touches two files the rule above names. See the callout
-at the top — the question of what gives way is open.
+**Budget note:** the fourth of ten, and the first taken deliberately in two of the high-churn files.
+Authorised on the grounds above: sign-in did not work at all in an embedded browser, and no
+deployment-side code could reach the token.
