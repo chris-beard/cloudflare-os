@@ -724,6 +724,14 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     await this.ctx.exports.PendingLogin.get(id).confirm(ticket);
   }
 
+  async redeemLogin(ticket: string, nonce: string): Promise<string> {
+    // Same lookup as confirmLogin: the nonce names the attempt's object and nothing else does.
+    const nonceHash = await hashPresentedSecret(nonce);
+    if (nonceHash === undefined) throw new Error(EXPIRED_MESSAGE);
+    const id = this.ctx.exports.PendingLogin.idFromName(nonceHash);
+    return this.ctx.exports.PendingLogin.get(id).redeem(ticket);
+  }
+
   async authenticate(token: string): Promise<AuthenticatedApi> {
     let split = token.split(':');
     if (split.length !== 2) {

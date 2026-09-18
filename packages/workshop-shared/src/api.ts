@@ -99,6 +99,25 @@ export interface PublicApi extends RpcTarget {
    */
   confirmLogin(ticket: string, nonce: string): Promise<void>;
 
+  /**
+   * Finish a sign-in that ran in the browser's own tab rather than in a popup, returning the session
+   * token to the page that started it. Called by the /connect/handoff page when it is the page that
+   * began the flow: `ticket` from its URL fragment, `nonce` from its own sessionStorage.
+   *
+   * `startGatekeeperLogin` + `confirmLogin` + `LoginAttempt.receive()` keep the token away from the
+   * window that visits the provider by splitting the two secrets across two windows. That requires a
+   * window to split into. Browsers embedded in another application -- an in-app browser, a desktop
+   * app's web pane -- return null from `window.open()` for a genuine user click, with no setting a
+   * user can change, so there sign-in has no popup to use and a full-page redirect destroys the
+   * attempt stub before it can receive anything.
+   *
+   * This releases the token to a caller holding both secrets instead. The nonce never appears in a
+   * URL and sessionStorage survives the round trip through the provider, so the pairing is the one
+   * public OAuth clients already rely on: an authorization code that travels, and a verifier that
+   * does not. Single use, and it consumes the attempt, so the popup path cannot also collect it.
+   */
+  redeemLogin(ticket: string, nonce: string): Promise<string>;
+
   /** Authenticates the user using an auth token (typically stored in localStorage). */
   authenticate(token: string): Promise<AuthenticatedApi>;
 
