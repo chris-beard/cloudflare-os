@@ -138,6 +138,29 @@ export class PendingLogin extends DurableObject<Cloudflare.Env> {
   }
 
   /**
+   * Confirm with the ticket and release the token in one step, to a caller that holds BOTH the
+   * ticket and the flow's nonce -- which is what a sign-in that ran in the tab itself has, and what
+   * a popup-based one deliberately splits between two windows.
+   *
+   * A browser that will not open a popup (an app's in-app view, a desktop app's web pane) cannot do
+   * the split: a full-page redirect destroys the page holding the attempt stub, so `receive()` has
+   * no caller left. The two secrets are still both required, and this is the same pairing OAuth
+   * itself uses for public clients -- the ticket arrives in the URL like an authorization code, the
+   * nonce waits in the tab's own sessionStorage like a PKCE verifier and never travels. A leaked
+   * handoff link still redeems nothing without it.
+   *
+   * Single use, like `receive()`: the result is cleared before the token is returned, so a popup
+   * attempt racing this one finds nothing rather than a second copy.
+   */
+  async redeem(ticket: string): Promise<string> {
+    const hash = await hashPresentedSecret(ticket);
+    const result = await this.#result();
+    if ("pending" in result || hash !== result.ticketHash) throw new Error(EXPIRED_MESSAGE);
+    await this.#clear();
+    return result.token;
+  }
+
+  /**
    * Release the token to the holder of the attempt once the popup has confirmed it; null while the
    * attempt is still pending or the token is delivered but unconfirmed, so the caller polls. Single
    * use: the result is removed with the read, so a repeat gets no second try.
