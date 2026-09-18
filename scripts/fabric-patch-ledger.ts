@@ -16,15 +16,20 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-/** Upstream refuses contributions, so every patch is permanent. Three is the hard ceiling. */
-export const MAX_PATCHES = 3;
+/**
+ * Upstream refuses contributions, so every patch is permanent. PATCHES.md sets the budget -- ten since
+ * Chris raised it on 2026-09-17 -- and explains why the count is the cheap half of the rule. This
+ * number must match it.
+ */
+export const MAX_PATCHES = 10;
 
 /**
- * Files no patch may touch. Past this line the fork is an unfunded rewrite of the kernel, not a
- * distro: these are the highest-churn files in the repo (overseer.ts alone takes ~232 diff hunks a
- * month) or the public API every gatekeeper compiles against.
+ * Files a patch may touch only on purpose. These are the highest-churn files in the repo (overseer.ts
+ * alone takes ~232 diff hunks a month) or the public API every gatekeeper compiles against, so a patch
+ * here is re-read on every merge. The patch's own PATCHES.md entry must name each one on its
+ * `**High-churn:**` line: an acknowledgement a reviewer sees, never a side effect of a FILES trailer.
  */
-export const FORBIDDEN = [
+export const HIGH_CHURN = [
   /^packages\/workshop-backend\/src\/overseer\.ts$/,
   /^packages\/workshop-backend\/src\/agent\.ts$/,
   /^packages\/workshop-backend\/src\/server\.ts$/,
@@ -44,16 +49,20 @@ export const NEW_FILE_ONLY = [
 
 export interface Diverged { status: string; path: string }
 export interface Trailer { commit: string; id: string; files: string[] }
-export interface LedgerEntry { id: string; landed: boolean }
+export interface LedgerEntry { id: string; landed: boolean; highChurn: string[] }
 export interface Report { errors: string[]; warnings: string[] }
 
-/** Read the `## \`id\` — LANDED` / `— NOT YET LANDED` headings out of PATCHES.md. */
+/**
+ * Read the `## \`id\` — LANDED` / `— NOT YET LANDED` headings out of PATCHES.md, with the backticked
+ * paths on each section's own `**High-churn:**` line.
+ */
 export function parseLedger(markdown: string): LedgerEntry[] {
-  const entries: LedgerEntry[] = [];
-  for (const match of markdown.matchAll(/^##\s+`([^`]+)`\s*[—–-]+\s*(NOT YET LANDED|LANDED)\b/gm)) {
-    entries.push({ id: match[1]!, landed: match[2] === "LANDED" });
-  }
-  return entries;
+  const headings = [...markdown.matchAll(/^##\s+`([^`]+)`\s*[—–-]+\s*(NOT YET LANDED|LANDED)\b/gm)];
+  return headings.map((match, index) => {
+    const section = markdown.slice(match.index, headings[index + 1]?.index ?? markdown.length);
+    const line = /^\*\*High-churn:\*\*(.*)$/m.exec(section)?.[1] ?? "";
+    return { id: match[1]!, landed: match[2] === "LANDED", highChurn: [...line.matchAll(/`([^`]+)`/g)].map((path) => path[1]!) };
+  });
 }
 
 export function checkLedger(input: {
@@ -66,7 +75,7 @@ export function checkLedger(input: {
   if (ledger.length > MAX_PATCHES) {
     errors.push(
       `PATCHES.md records ${ledger.length} patches (landed or planned); the ceiling is ` +
-      `${MAX_PATCHES}. A fourth means re-scoping, not raising the number.`);
+      `${MAX_PATCHES} (PATCHES.md). Re-scope, or retire a patch, before recording another.`);
   }
 
   const landed = new Set(ledger.filter((entry) => entry.landed).map((entry) => entry.id));
@@ -86,16 +95,17 @@ export function checkLedger(input: {
     }
   }
 
+  const acknowledged = new Map(ledger.map((entry) => [entry.id, new Set(entry.highChurn)]));
   const claimed = new Map<string, string>();
   for (const trailer of trailers) {
     if (trailer.files.length === 0) {
       errors.push(`${trailer.id} (${trailer.commit}) has no FILES trailer, so nothing it changes is claimed.`);
     }
     for (const file of trailer.files) {
-      if (FORBIDDEN.some((pattern) => pattern.test(file))) {
+      if (HIGH_CHURN.some((pattern) => pattern.test(file)) && !acknowledged.get(trailer.id)?.has(file)) {
         errors.push(
-          `${trailer.id} patches ${file}, which is on the forbidden list. That is the documented ` +
-          `signal to stop and re-scope.`);
+          `${trailer.id} patches ${file}, a high-churn kernel file, but its own PATCHES.md entry does not ` +
+          `list it on a **High-churn:** line. Say why no seam reaches it there, or re-scope.`);
       }
       claimed.set(file, trailer.id);
     }

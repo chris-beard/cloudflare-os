@@ -67,7 +67,8 @@ jobs:
       # Every file that differs from upstream must be a downstream-only file or be claimed by a
       # PATCH-ID commit that PATCHES.md explains. A static allowlist could not tell a recorded patch
       # from an unrecorded one; this reads both records and requires them to agree, caps the series
-      # at three, and refuses patches to the forbidden kernel files.
+      # at ten (PATCHES.md's budget), and refuses a patch to a high-churn kernel file unless the
+      # patch's own PATCHES.md entry names it on its **High-churn:** line.
       #
       # The ledger script is TypeScript run directly by node, which needs native type stripping --
       # so pin the same Node the suite uses rather than inherit the runner's default.

@@ -9,7 +9,7 @@ three on 2026-09-17, deliberately: carrying a set of patches is expected of this
 discipline is to keep each one justified rather than to keep the count artificially small. A patch
 earns its place by directly supporting what Fabric offers that upstream does not.)
 
-The count is the cheap half of the rule. Six files cost more than a slot: `overseer.ts`, `agent.ts`,
+The count is the cheap half of the rule. Six files cost more than a slot (the gate, `scripts/fabric-patch-ledger.ts`, calls them high-churn and refuses one that a patch's entry does not name on its `**High-churn:**` line): `overseer.ts`, `agent.ts`,
 `server.ts`, `ai-models.ts`, `workshop-shared/src/api.ts`, `workshop-frontend/`. A patch landing in
 one of them is not forbidden — `fabric-popupless-signin` took two on purpose — but it has to say why
 no seam reaches, and it should expect to be re-read on every merge rather than carried unexamined.
@@ -98,6 +98,8 @@ external fetch on the sign-in path. A blank avatar is an ordinary state; this is
 
 **Files:** `packages/workshop-backend/src/auth/login-flow.ts`,
 `packages/workshop-backend/src/server.ts`, `packages/workshop-shared/src/api.ts`
+
+**High-churn:** `packages/workshop-backend/src/server.ts`, `packages/workshop-shared/src/api.ts` — taken deliberately (see Budget note below); the patch ledger gate refuses a high-churn file a patch does not name here.
 
 **Why no seam:** the session token is minted inside the kernel and released only by
 `LoginAttempt.receive()`, on an `RpcTarget` constructed per attempt and returned over the live Cap'n
