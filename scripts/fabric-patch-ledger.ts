@@ -136,7 +136,7 @@ const FILES_VALUE = new RegExp(`^(${PATH_LIST})$`);
 const HIGH_CHURN_VALUE = new RegExp(`^(${PATH_LIST})(?: — [^\`]+)?$`);
 
 // A URI autolink (<https://...>) is a link, never HTML: no tag name can hold the colon after its scheme.
-const AUTOLINK = /<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\x00-\x20]*>/g;
+const AUTOLINK = /<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\p{Cc} ]*>/gu;
 
 /** Render a line for an error message with invisible or look-alike characters spelled out. */
 function show(line: string): string {

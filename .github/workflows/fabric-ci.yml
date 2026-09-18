@@ -82,10 +82,23 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ steps.node.outputs.version }}
+      # On a pull request the gate that judges it is the one on the branch it targets, not the PR's
+      # own copy: otherwise one change could relax the gate and pass it at the same time. A PR that
+      # changes the gate is therefore judged by the old gate, and the new one takes over once merged.
+      # The branch name reaches the shell through env, never interpolated into the script.
       - name: Patch ledger
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           git fetch -q origin upstream-main
-          node scripts/fabric-patch-ledger.ts origin/upstream-main
+          gate=scripts/fabric-patch-ledger.ts
+          if [ "$EVENT" = "pull_request" ]; then
+            git fetch -q origin "$BASE_REF"
+            gate="$RUNNER_TEMP/fabric-patch-ledger.ts"
+            git show "origin/$BASE_REF:scripts/fabric-patch-ledger.ts" > "$gate"
+          fi
+          node "$gate" origin/upstream-main
 
       # Gate B: test-file superset. Upstream ships its enforcement tests WITH the confinement fix
       # (#380 added 5 test files alongside an authorization change), so a test file that exists
