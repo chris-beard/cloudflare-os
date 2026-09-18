@@ -11,10 +11,10 @@
 //     (why no seam reaches it, when to re-review).
 // A static allowlist cannot tell a recorded patch from an unrecorded one; this can.
 //
-// Neither record is taken on trust. A FILES trailer is checked against the diff of the commit that
-// carries it, and PATCHES.md is read the way a reviewer sees it: text a renderer hides (comments,
-// code fences) counts for nothing, and anything this parser cannot read with certainty -- an odd
-// heading, an odd line break, raw HTML -- fails the gate rather than being skipped.
+// Neither record is taken on trust. A FILES trailer must name exactly what its commit changes; a merge
+// may carry only what git merges on its own; and PATCHES.md is read the way a reviewer sees it: text a
+// renderer hides (comments, code fences) counts for nothing, and anything this parser cannot read with
+// certainty -- an odd heading, an odd character, raw HTML -- fails the gate rather than being skipped.
 //
 //   node scripts/fabric-patch-ledger.ts [base-ref]     (default base: upstream-main)
 
@@ -25,7 +25,7 @@ import { join } from "node:path";
 /**
  * Upstream refuses contributions, so every patch is permanent. PATCHES.md sets the budget -- ten since
  * Chris raised it on 2026-09-17 -- and explains why the count is the cheap half of the rule. This
- * number must match it.
+ * number must match it. A RETIRED entry no longer counts.
  */
 export const MAX_PATCHES = 10;
 
@@ -61,10 +61,15 @@ export const LEDGER_TITLE = "# Downstream patches";
 
 /** A path that differs between the merge base and HEAD, with git's name-status letter. */
 export interface Diverged { status: string; path: string }
-/** A commit in base..HEAD: its PATCH-ID and FILES trailers, and the paths its own diff changes. */
-export interface Commit { commit: string; merge: boolean; id: string | null; files: string[]; changed: string[] }
+/**
+ * A commit in base..HEAD: how many parents it has, its PATCH-ID and FILES trailers, and the paths it
+ * itself changes -- for a merge, only what differs from the merge git would have made on its own.
+ */
+export interface Commit { commit: string; parents: number; id: string | null; files: string[]; changed: string[] }
+/** Shipped, planned, or shipped and since undone (kept as the record, no longer counted). */
+export type Status = "LANDED" | "NOT YET LANDED" | "RETIRED";
 /** One `## \`id\` — …` entry in PATCHES.md. `files` is null when the entry has no **Files:** line. */
-export interface LedgerEntry { id: string; landed: boolean; files: string[] | null; highChurn: string[] }
+export interface LedgerEntry { id: string; status: Status; files: string[] | null; highChurn: string[] }
 /** Every entry PATCHES.md records, plus anything in it the gate could not read with certainty. */
 export interface Ledger { entries: LedgerEntry[]; errors: string[] }
 /** What checkLedger needs; readRepo builds it from git and the working tree. */
@@ -75,21 +80,52 @@ export interface Report { errors: string[]; warnings: string[] }
 const isHighChurn = (path: string) => HIGH_CHURN.some((pattern) => pattern.test(path));
 const isDownstreamOnly = (path: string) => NEW_FILE_ONLY.some((pattern) => pattern.test(path));
 
-// The one heading shape an entry may take: literal single spaces, an em dash, a dated LANDED or an
-// exact NOT YET LANDED, nothing after. Anything looser is how an eleventh patch went uncounted.
-const ENTRY_HEADING = /^## `([a-z0-9][a-z0-9._-]*)` — (LANDED \d{4}-\d{2}-\d{2}|NOT YET LANDED)$/;
+/**
+ * The only characters PATCHES.md may hold: tab, printable ASCII, and the en dash, em dash and arrow it
+ * already uses. Anything else is somewhere a renderer, an editor and this parser can disagree. A no-break
+ * or other Unicode space is blank to JavaScript's trim() but text to CommonMark, so the line above it can
+ * become a heading; a zero-width or direction mark in front of "##" hides a heading from this parser
+ * while the source looks exactly like one; U+2028 is a line break to a JavaScript regex and not to
+ * Markdown. Widen this only with characters that are visible and are not spaces or line breaks.
+ */
+const NOT_PLAIN = /[^\t\x20-\x7e\u2013\u2014\u2192]/u;
+
+// Blank as CommonMark means it: nothing but spaces and tabs. Never trim(), which also strips Unicode
+// spaces that CommonMark treats as text.
+const isBlank = (line: string) => /^[ \t]*$/.test(line);
+
+// The one heading shape an entry may take: literal single spaces, an em dash, then LANDED or RETIRED
+// with a date, or exactly NOT YET LANDED, and nothing after. Anything looser is how an eleventh patch
+// went uncounted.
+const ENTRY_HEADING = /^## `([a-z0-9][a-z0-9._-]*)` — (?:(LANDED|RETIRED) \d{4}-\d{2}-\d{2}|NOT YET LANDED)$/;
+
+/**
+ * Match an entry heading, first dropping what a renderer drops from the end of one: trailing spaces or
+ * tabs, and a closing run of #. Refusing those only produced knock-on errors for an identical heading.
+ */
+function entryHeading(line: string): { id: string; status: Status } | null {
+  const match = ENTRY_HEADING.exec(line.replace(/(?:[ \t]+#+)?[ \t]*$/, ""));
+  return match ? { id: match[1]!, status: (match[2] ?? "NOT YET LANDED") as Status } : null;
+}
 
 // Anything a Markdown renderer could show as an ATX heading: any level, any indent, inside a quote
-// or list item, or after a Unicode space (JavaScript's \s includes NBSP). Deliberately broader than
-// CommonMark, so no heading slips past ENTRY_HEADING by being written slightly differently.
+// or list item. Deliberately broader than CommonMark, so no heading slips past ENTRY_HEADING by being
+// written slightly differently.
 const LOOKS_LIKE_HEADING = /^(?:\s|>|[-*+]\s|\d{1,9}[.)]\s)*#{1,6}(?:\s|$)/;
-// A line of = or - directly under paragraph text turns that text into a (setext) heading.
-const SETEXT_UNDERLINE = /^ {0,3}(?:=+|-+)[ \t]*$/;
-// `---` and friends. A section ends here: text after a break is not visibly part of the entry above.
+// A run of = or - directly under paragraph text turns that text into a (setext) heading -- inside a
+// quote (`> ---`) or a list item (indented to any depth) too, so any such prefix is allowed.
+const SETEXT_UNDERLINE = /^[ \t>]*(?:=+|-+)[ \t]*$/;
+// `---` and friends, in CommonMark's exact form (at most three spaces in, no prefix). A line this
+// matches is never taken for paragraph text, so it must not match more: `    ***` continues a
+// paragraph, and an underline below it makes a heading the setext check would then not see.
 const THEMATIC_BREAK = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+// Where a section ends: a rule at any depth, inside a quote or list item too, because a reader sees
+// the text after any rule as apart from the entry above. Ending a section too eagerly only turns a
+// later field into an error, never a pass, so this one may match more than a renderer would.
+const SECTION_BREAK = /^(?:[ \t>]|[-*+][ \t]|\d{1,9}[.)][ \t])*([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 
 // The two fields the gate reads, only in this exact form at the start of a line.
-const FIELD = /^\*\*(Files|High-churn):\*\*(?: (.*))?$/;
+const FIELD = /^\*\*(Files|High-churn):\*\*(?:[ \t]+(.*))?$/;
 // Anything a reader might take for one of them. Seen but not in exact form, it is an error rather than
 // silently ignored, so an entry never shows a reviewer a field the gate did not read.
 const LOOKS_LIKE_FIELD = /^(?:\s|>|[-*+]\s|\d{1,9}[.)]\s)*(?:\*\*|__)\s*(?:files|high[\s-]*churn)\b/i;
@@ -98,6 +134,9 @@ const FILES_VALUE = new RegExp(`^(${PATH_LIST})$`);
 // Paths first, then optional prose after " — ". The prose may not hold backticks, so a path in it --
 // "none (an early draft touched `overseer.ts`)" -- can never be read, or misread, as acknowledged.
 const HIGH_CHURN_VALUE = new RegExp(`^(${PATH_LIST})(?: — [^\`]+)?$`);
+
+// A URI autolink (<https://...>) is a link, never HTML: no tag name can hold the colon after its scheme.
+const AUTOLINK = /<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\x00-\x20]*>/g;
 
 /** Render a line for an error message with invisible or look-alike characters spelled out. */
 function show(line: string): string {
@@ -135,7 +174,7 @@ function hideInvisible(lines: string[], errors: string[]): string[] {
         errors.push(`PATCHES.md line ${n}: "--!>" ends an HTML comment early in a browser. Remove it.`);
       }
       if (end >= 0) {
-        if (line.slice(end + 3).trim() !== "") {
+        if (!isBlank(line.slice(end + 3))) {
           errors.push(
             `PATCHES.md line ${n}: text after "-->" is rendered, not hidden. End a comment at the end of ` +
             `its line.`);
@@ -163,28 +202,30 @@ function hideInvisible(lines: string[], errors: string[]): string[] {
 }
 
 /**
- * Read PATCHES.md's entries -- id, LANDED or not, the **Files:** list and the **High-churn:** list --
- * failing closed on anything whose reading is uncertain. The file is: the title line, a preamble, then
- * entries. An entry's section runs to the next heading or thematic break, and holds at most one of
- * each field. Every heading after the title must be an exact entry heading.
+ * Read PATCHES.md's entries -- id, status, the **Files:** list and the **High-churn:** list -- failing
+ * closed on anything whose reading is uncertain. The file is: the title line, a preamble, then entries.
+ * An entry's section runs to the next heading or thematic break, and holds at most one of each field.
+ * Every heading after the title must be an exact entry heading.
  */
 export function parseLedger(markdown: string): Ledger {
   const errors: string[] = [];
   const entries: LedgerEntry[] = [];
 
-  // Line breaks are ours to decide: \n or \r\n only. U+2028/U+2029 and friends split a line for
-  // JavaScript's multiline ^ (and some renderers) but not for CommonMark, and a lone \r splits it for
-  // CommonMark but not for us. Either way a heading could exist for one reader and not the other.
-  markdown.split("\n").forEach((line, index) => {
-    const odd = /[\r\v\f\u0085\u2028\u2029]/.exec(line.replace(/\r$/, ""));
+  // A leading byte-order mark belongs to the editor, and every renderer drops it; so does the gate.
+  const raw = markdown.replace(/^\uFEFF/, "").split(/\r?\n/);
+
+  // Line breaks are ours to decide (\n or \r\n only), and so is every other character: see NOT_PLAIN.
+  raw.forEach((line, index) => {
+    const odd = NOT_PLAIN.exec(line);
     if (odd) {
       errors.push(
-        `PATCHES.md line ${index + 1} contains ${show(odd[0])}, an unusual line or paragraph separator. ` +
-        `Use a plain newline.`);
+        `PATCHES.md line ${index + 1} contains ${show(odd[0])}. PATCHES.md may hold only printable ` +
+        `ASCII, tabs and – — →: anything else can be invisible, pass for a space or a line break, or ` +
+        `make a heading for one reader and not another.`);
     }
   });
 
-  const lines = hideInvisible(markdown.split(/\r?\n/), errors);
+  const lines = hideInvisible(raw, errors);
   if (lines[0] !== LEDGER_TITLE) {
     errors.push(`PATCHES.md must start with the line "${LEDGER_TITLE}"; found ${show(lines[0] ?? "")}.`);
   }
@@ -214,7 +255,7 @@ export function parseLedger(markdown: string): Ledger {
   };
 
   const isParagraphText = (line: string) =>
-    line.trim() !== "" && !LOOKS_LIKE_HEADING.test(line) && !THEMATIC_BREAK.test(line);
+    !isBlank(line) && !LOOKS_LIKE_HEADING.test(line) && !THEMATIC_BREAK.test(line);
 
   for (const [index, line] of lines.entries()) {
     const n = index + 1;
@@ -223,13 +264,14 @@ export function parseLedger(markdown: string): Ledger {
 
     // A <details>, a hidden element or an unclosed tag can fold away the text after it, and telling a
     // tag from a code span needs a full Markdown parser. PATCHES.md has no use for raw HTML.
-    if (/<[A-Za-z/!?]/.test(line)) {
+    if (/<[A-Za-z/!?]/.test(line.replace(AUTOLINK, ""))) {
       errors.push(
-        `PATCHES.md line ${n}: raw HTML (or a <link>) is not allowed outside a whole-line comment, ` +
-        `because it can hide what follows it.`);
+        `PATCHES.md line ${n}: raw HTML is not allowed outside a whole-line comment, because it can hide ` +
+        `what follows it. A "<" inside a code span counts too (the gate does not parse code spans), so ` +
+        `write around it.`);
     }
 
-    if (line.trim() === "") {
+    if (isBlank(line)) {
       endField();
       continue;
     }
@@ -237,26 +279,26 @@ export function parseLedger(markdown: string): Ledger {
     const setext = SETEXT_UNDERLINE.test(line) && isParagraphText(previous);
     if (LOOKS_LIKE_HEADING.test(line) || setext) {
       endField();
-      const match = setext ? null : ENTRY_HEADING.exec(line);
-      if (!match) {
+      const heading = setext ? null : entryHeading(line);
+      if (!heading) {
         errors.push(
           `unrecognised ledger heading on PATCHES.md line ${setext ? n - 1 : n}: ` +
-          `${setext ? `${show(previous)} underlined by ${show(line)}` : show(line)}. After the title, ` +
-          `every heading must be exactly "## \`<id>\` — LANDED YYYY-MM-DD" or "## \`<id>\` — NOT YET LANDED".`);
+          `${setext ? `${show(previous)} underlined by ${show(line)} (put a blank line above a rule)` : show(line)}. ` +
+          `After the title, every heading must be exactly "## \`<id>\` — LANDED YYYY-MM-DD", ` +
+          `"## \`<id>\` — NOT YET LANDED" or "## \`<id>\` — RETIRED YYYY-MM-DD".`);
         entry = null;
         continue;
       }
-      const id = match[1]!;
-      if (entries.some((existing) => existing.id === id)) {
-        errors.push(`${id} has more than one entry in PATCHES.md (again on line ${n}). One patch, one entry.`);
+      if (entries.some((existing) => existing.id === heading.id)) {
+        errors.push(`${heading.id} has more than one entry in PATCHES.md (again on line ${n}). One patch, one entry.`);
       }
-      entry = { id, landed: match[2]!.startsWith("LANDED"), files: null, highChurn: [] };
+      entry = { id: heading.id, status: heading.status, files: null, highChurn: [] };
       entries.push(entry);
       given = new Set();
       continue;
     }
 
-    if (THEMATIC_BREAK.test(line)) {
+    if (SECTION_BREAK.test(line)) {
       endField();
       entry = null;
       continue;
@@ -273,7 +315,7 @@ export function parseLedger(markdown: string): Ledger {
         errors.push(
           `PATCHES.md line ${n}: this **${match[1]}:** line is outside any patch entry, so it names ` +
           `nothing. Put it in the entry it belongs to.`);
-      } else if (previous.trim() !== "" && !ENTRY_HEADING.test(previous)) {
+      } else if (!isBlank(previous) && !entryHeading(previous)) {
         // Glued to the line above, it renders inside that paragraph rather than as a field of its own.
         errors.push(`PATCHES.md line ${n}: a **${match[1]}:** line must start its own paragraph.`);
       } else if (given.has(match[1]!)) {
@@ -311,27 +353,40 @@ export function checkLedger(input: LedgerInput): Report {
   const { diverged, commits } = input;
   const { entries } = input.ledger;
 
-  // Every entry counts, landed or planned, duplicate or not: the budget is spent when it is written down.
-  if (entries.length > MAX_PATCHES) {
+  // Every entry counts, landed or planned, duplicate or not: the budget is spent when it is written
+  // down. Only a RETIRED entry -- undone, and checked below to have left nothing behind -- is free.
+  const counted = entries.filter((entry) => entry.status !== "RETIRED");
+  if (counted.length > MAX_PATCHES) {
     errors.push(
-      `PATCHES.md records ${entries.length} patches (landed or planned); the ceiling is ` +
-      `${MAX_PATCHES} (PATCHES.md). Re-scope, or retire a patch, before recording another.`);
+      `PATCHES.md records ${counted.length} patches (landed or planned); the ceiling is ` +
+      `${MAX_PATCHES} (PATCHES.md). Re-scope, or retire a patch (revert it and mark it RETIRED), ` +
+      `before recording another.`);
   }
 
   // A duplicate id is already an error; the first entry is the one a reader finds, so it is the one used.
   const entryById = new Map<string, LedgerEntry>();
   for (const entry of entries) if (!entryById.has(entry.id)) entryById.set(entry.id, entry);
+  const withStatus = (status: Status) =>
+    new Set(entries.filter((entry) => entry.status === status).map((entry) => entry.id));
+  const landed = withStatus("LANDED");
+  const planned = withStatus("NOT YET LANDED");
+  const retired = withStatus("RETIRED");
 
-  const patches = commits.filter((commit) => commit.id !== null);
-  const landed = new Set(entries.filter((entry) => entry.landed).map((entry) => entry.id));
-  const planned = new Set(entries.filter((entry) => !entry.landed).map((entry) => entry.id));
+  // A patch is the commit that makes the change, which the FILES and High-churn checks below hold to
+  // its entry. A merge is never one: its own changes are checked with the unpatched commits further down.
+  for (const merge of commits.filter((commit) => commit.parents > 1 && commit.id !== null)) {
+    errors.push(
+      `${merge.id} (${merge.commit}) carries PATCH-ID on a merge commit. Put it on the commit that ` +
+      `makes the change.`);
+  }
+  const patches = commits.filter((commit) => commit.parents <= 1 && commit.id !== null);
   const shipped = new Set(patches.map((patch) => patch.id!));
 
   for (const id of shipped) {
     if (planned.has(id)) {
       errors.push(`${id} is shipped (has a PATCH-ID commit) but PATCHES.md still says NOT YET LANDED.`);
-    } else if (!landed.has(id)) {
-      errors.push(`${id} is shipped but has no "LANDED" section in PATCHES.md explaining why.`);
+    } else if (!landed.has(id) && !retired.has(id)) {
+      errors.push(`${id} is shipped but has no "LANDED" or "RETIRED" section in PATCHES.md explaining why.`);
     }
   }
   for (const id of landed) {
@@ -339,13 +394,20 @@ export function checkLedger(input: LedgerInput): Report {
       errors.push(`PATCHES.md marks ${id} LANDED but no commit carries "PATCH-ID: ${id}".`);
     }
   }
+  for (const id of retired) {
+    if (!shipped.has(id)) {
+      errors.push(
+        `PATCHES.md marks ${id} RETIRED but no commit carries "PATCH-ID: ${id}". A patch that never ` +
+        `shipped is deleted from PATCHES.md, not retired.`);
+    }
+  }
 
   // The entry's **Files:** list and the trailers must name the same files, both ways. Otherwise an
   // unrelated change can ship under an existing PATCH-ID without its entry visibly changing.
   for (const entry of entryById.values()) {
-    if (!entry.landed) continue;
+    if (entry.status === "NOT YET LANDED") continue;
     if (entry.files === null) {
-      errors.push(`${entry.id} is LANDED but its PATCHES.md entry has no readable **Files:** line.`);
+      errors.push(`${entry.id} is ${entry.status} but its PATCHES.md entry has no readable **Files:** line.`);
       continue;
     }
     const trailed = new Set(patches.filter((patch) => patch.id === entry.id).flatMap((patch) => patch.files));
@@ -366,18 +428,15 @@ export function checkLedger(input: LedgerInput): Report {
     }
   }
 
+  const divergedPaths = new Set(diverged.map((entry) => entry.path));
   const claimed = new Map<string, string>();
   for (const patch of patches) {
-    if (patch.merge) {
-      // A merge's own diff is not read (see readRepo), so a trailer there would claim what nothing checks.
-      errors.push(
-        `${patch.id} (${patch.commit}) carries PATCH-ID on a merge commit. Put it on the commit that ` +
-        `makes the change.`);
-    }
     if (patch.files.length === 0) {
       errors.push(`${patch.id} (${patch.commit}) has no FILES trailer, so nothing it changes is claimed.`);
     }
-    // A trailer is a claim to check, not a fact: every kernel file the commit changes must be on it.
+    // A trailer is a claim to check, not a fact. It must name exactly what its commit changes: every
+    // kernel file the commit edits, and nothing it leaves alone -- a claim on an untouched file would
+    // cover lines some other commit put there.
     for (const path of patch.changed) {
       if (!isDownstreamOnly(path) && !patch.files.includes(path)) {
         errors.push(
@@ -386,26 +445,50 @@ export function checkLedger(input: LedgerInput): Report {
       }
     }
     for (const file of patch.files) {
+      if (!patch.changed.includes(file)) {
+        errors.push(
+          `${patch.id} (${patch.commit}) lists ${file} in its FILES trailer but does not change it. A ` +
+          `trailer names exactly what its commit changes.`);
+      }
       if (isHighChurn(file) && !entryById.get(patch.id!)?.highChurn.includes(file)) {
         errors.push(
           `${patch.id} patches ${file}, a high-churn kernel file, but its own PATCHES.md entry does not ` +
           `list it on a **High-churn:** line. Say why no seam reaches it there, or re-scope.`);
       }
-      claimed.set(file, patch.id!);
+      if (!retired.has(patch.id!)) {
+        claimed.set(file, patch.id!);
+      } else if (divergedPaths.has(file) && !isDownstreamOnly(file)) {
+        // Retired means undone. The gate works per file, so it cannot tell whose lines remain in a file
+        // another patch still changes; it accepts the retirement once the file is upstream's again.
+        errors.push(
+          `${patch.id} is RETIRED but ${file}, which it patched, still differs from upstream. Revert its ` +
+          `change first; if another patch keeps ${file} diverged, ${patch.id} stays LANDED until that ` +
+          `file matches upstream again.`);
+      }
     }
   }
 
-  const divergedPaths = new Set(diverged.map((entry) => entry.path));
-  // A file one patch claims is not free for any other commit to edit: whoever touches a diverged
-  // kernel file must carry a PATCH-ID of their own, which the checks above then hold to its entry.
+  // A file one patch claims is not free for any other commit to edit: whoever touches a diverged kernel
+  // file must be a PATCH-ID commit, which the checks above then hold to its entry. That includes a
+  // merge. Its own changes are what differs from the merge git would have made unaided -- a conflict
+  // resolved by hand, or an edit slipped in -- and a merge cannot carry a PATCH-ID for them.
   for (const commit of commits) {
-    if (commit.merge || commit.id !== null) continue;
+    if (commit.parents > 2) {
+      errors.push(
+        `${commit.commit} merges ${commit.parents} parents at once. git re-merges only two, so the gate ` +
+        `cannot see what this merge changed by hand. Merge one branch at a time.`);
+    }
+    if (commit.parents <= 1 && commit.id !== null) continue; // a patch commit: checked above
     for (const path of commit.changed) {
-      if (divergedPaths.has(path) && !isDownstreamOnly(path)) {
-        errors.push(
-          `${commit.commit} changes ${path}, which differs from upstream, but carries no PATCH-ID. ` +
-          `Every commit that edits a patched file is part of a recorded patch.`);
-      }
+      if (!divergedPaths.has(path) || isDownstreamOnly(path)) continue;
+      errors.push(
+        commit.parents > 1
+          ? `${commit.commit} is a merge that changes ${path} beyond what git merges on its own (a ` +
+            `conflict resolved by hand, or an edit). That file differs from upstream, so the change ` +
+            `belongs in a PATCH-ID commit: move the patch's conflicting lines aside in one before the ` +
+            `merge, let git merge the file cleanly, and restore them in one after.`
+          : `${commit.commit} changes ${path}, which differs from upstream, but carries no PATCH-ID. ` +
+            `Every commit that edits a patched file is part of a recorded patch.`);
     }
   }
 
@@ -436,40 +519,50 @@ export function checkLedger(input: LedgerInput): Report {
   return { errors, warnings };
 }
 
-function git(args: string[]): string {
-  const result = spawnSync("git", args, { encoding: "utf8" });
+function git(args: string[], cwd?: string): string {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
   if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr.trim()}`);
   return result.stdout;
 }
 
+/**
+ * The paths a commit itself changes. For an ordinary commit, its diff against its parent. For a merge,
+ * what differs from the merge git makes on its own (--remerge-diff): nothing for a clean merge, like
+ * all three on distro so far, and the file for a conflict resolved by hand or an edit slipped in.
+ * Comparing with the parents instead (`--cc`) is not enough: a merge whose second parent is an OLD
+ * upstream commit can restore that commit's lines and look as if it merely picked a side.
+ */
+function changedBy(sha: string, parents: number, root: string): string[] {
+  // git skips an octopus merge's remerge-diff silently, printing nothing; checkLedger refuses one outright.
+  if (parents > 2) return [];
+  const args = parents === 2
+    ? ["show", "--remerge-diff", "--format=", "--name-only", "-z", "--no-renames", "--no-color",
+      "--no-show-signature", sha]
+    : ["diff-tree", "--no-commit-id", "--name-only", "-z", "-r", "--no-renames", "--root", sha];
+  return git(args, root).split("\0").filter(Boolean);
+}
+
 /** Gather checkLedger's input from git (base..HEAD) and the working tree's PATCHES.md. */
 export function readRepo(base: string, root: string): LedgerInput {
-  const diverged = git(["diff", "--name-status", "--no-renames", `${base}...HEAD`])
-    .split("\n").filter(Boolean)
-    .map((line) => {
-      const [status, ...rest] = line.split("\t");
-      return { status: status!, path: rest.join("\t") };
-    });
+  // -z throughout, so a path is the same string in every list whatever characters it holds.
+  const fields = git(["diff", "--name-status", "-z", "--no-renames", `${base}...HEAD`], root).split("\0");
+  if (fields.pop() !== "" || fields.length % 2 !== 0) throw new Error("unexpected `git diff --name-status -z` output");
+  const diverged: Diverged[] = [];
+  for (let i = 0; i < fields.length; i += 2) diverged.push({ status: fields[i]!, path: fields[i + 1]! });
 
   const commits = git([
-    "log", "--format=%H%x1f%h%x1f%P%x1f%(trailers:key=PATCH-ID,valueonly,separator=%x20)" +
+    "log", "--no-show-signature",
+    "--format=%H%x1f%h%x1f%P%x1f%(trailers:key=PATCH-ID,valueonly,separator=%x20)" +
       "%x1f%(trailers:key=FILES,valueonly,separator=%x20)%x1e",
     `${base}..HEAD`,
-  ])
+  ], root)
     .split("\x1e").map((record) => record.trim()).filter(Boolean)
     .map((record) => {
-      const [sha, commit, parents, id, files] = record.split("\x1f");
-      const merge = (parents ?? "").trim().split(/\s+/).length > 1;
-      // What the commit really changes, against its only parent. A merge is left out: resolving an
-      // upstream merge legitimately rewrites patched files, and its result is still held to the rule
-      // that every diverged file is claimed.
-      const changed = merge
-        ? []
-        : git(["diff-tree", "--no-commit-id", "--name-only", "-r", "--no-renames", "--root", sha!])
-          .split("\n").filter(Boolean);
+      const [sha, commit, parentList, id, files] = record.split("\x1f");
+      const parents = (parentList ?? "").split(/\s+/).filter(Boolean).length;
       return {
-        commit: commit!, merge, id: id?.trim() || null,
-        files: (files ?? "").split(/\s+/).filter(Boolean), changed,
+        commit: commit!, parents, id: id?.trim() || null,
+        files: (files ?? "").split(/\s+/).filter(Boolean), changed: changedBy(sha!, parents, root),
       };
     });
 
@@ -477,16 +570,25 @@ export function readRepo(base: string, root: string): LedgerInput {
   return { diverged, commits, ledger };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Run the gate when this file is the program, not when the tests import it. This used to compare
+// import.meta.url with `file://${argv[1]}`, which is false for a path with a space (the URL encodes it)
+// or one reached through a symlink (the URL resolves it) -- and then the gate printed nothing and
+// passed. import.meta.main is exact. A Node too old to have it fails here rather than skip the gate.
+if (typeof import.meta.main !== "boolean") {
+  throw new Error("fabric-patch-ledger needs import.meta.main (Node 22.18+ or 24.2+) to know it was run.");
+}
+if (import.meta.main) {
   const base = process.argv[2] ?? "upstream-main";
   const root = git(["rev-parse", "--show-toplevel"]).trim();
   const input = readRepo(base, root);
   const { errors, warnings } = checkLedger(input);
 
-  const landed = input.ledger.entries.filter((entry) => entry.landed).length;
+  const count = (status: Status) => input.ledger.entries.filter((entry) => entry.status === status).length;
+  const retired = count("RETIRED");
   console.log(
     `Patch ledger vs ${base}: ${input.diverged.length} diverged file(s), ` +
-    `${landed} landed / ${input.ledger.entries.length} recorded (ceiling ${MAX_PATCHES}).`);
+    `${count("LANDED")} landed / ${input.ledger.entries.length - retired} recorded ` +
+    `(ceiling ${MAX_PATCHES})${retired ? `, ${retired} retired` : ""}.`);
   for (const warning of warnings) console.log(`::warning::${warning}`);
   for (const error of errors) console.log(`::error::${error}`);
   if (errors.length) process.exit(1);

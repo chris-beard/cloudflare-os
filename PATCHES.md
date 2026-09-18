@@ -19,6 +19,12 @@ what would retire it, and where its tests live (a file of its own, so a patch ad
 only where its behaviour does). A patch whose `REVIEW-IF` has fired is a patch to re-derive or drop,
 not to re-merge.
 
+Both happen in commits, never inside a merge. The gate refuses a merge that changes a patched file
+beyond what git merges on its own, so when upstream conflicts with a patch, move the patch's lines
+aside in a `PATCH-ID` commit, merge, and restore them in another. To drop a patch, revert it and
+change its heading to `RETIRED YYYY-MM-DD`. The entry stays as the record and frees its slot, and the
+gate accepts it once none of its files differ from upstream.
+
 Why any of this is strict when the budget is not: upstream refuses outside contributions
 (CONTRIBUTING.md) and closed an outside security report unmerged, so every line here is permanent
 divergence with no upstream path. Upstream also rewrote 77–83% of its hottest kernel files in a
